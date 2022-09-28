@@ -2,7 +2,18 @@
 
 interface HelloWorld {
     struct HelloRequest {
+
+        interface Callback {
+
+            struct CallbackResponse {
+                callbackMessage @0 :Text;
+            }
+
+            doCallback @0 (textParam :Text) -> (response :CallbackResponse);
+        }
+
         name @0 :Text;
+        callbackCap @1 :Callback;
     }
 
     struct HelloReply {

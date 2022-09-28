@@ -20,10 +20,29 @@
 // THE SOFTWARE.
 
 use crate::hello_world_capnp::hello_world;
-use capnp_rpc::{rpc_twoparty_capnp, twoparty, RpcSystem};
+use capnp_rpc::{pry, rpc_twoparty_capnp, twoparty, RpcSystem};
 use std::net::ToSocketAddrs;
 
 use futures::AsyncReadExt;
+use tokio::time::{sleep, Duration};
+
+struct CallBacker {}
+
+impl hello_world::hello_request::callback::Server for CallBacker {
+    fn do_callback(
+        &mut self,
+        params: hello_world::hello_request::callback::DoCallbackParams,
+        mut results: hello_world::hello_request::callback::DoCallbackResults,
+    ) -> capnp::capability::Promise<(), capnp::Error> {
+        let text_param = pry!(pry!(params.get()).get_text_param());
+
+        results
+            .get()
+            .init_response()
+            .set_callback_message(&format!("CALLBACK {}", text_param));
+        capnp::capability::Promise::ok(())
+    }
+}
 
 pub async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args: Vec<String> = ::std::env::args().collect();
@@ -40,37 +59,45 @@ pub async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let msg = args[3].to_string();
 
-    tokio::task::LocalSet::new().run_until(async move {
-        let stream = tokio::net::TcpStream::connect(&addr).await?;
-        stream.set_nodelay(true)?;
-        let (reader, writer) = tokio_util::compat::TokioAsyncReadCompatExt::compat(stream).split();
-        let rpc_network = Box::new(twoparty::VatNetwork::new(
-            reader,
-            writer,
-            rpc_twoparty_capnp::Side::Client,
-            Default::default(),
-        ));
-        let mut rpc_system = RpcSystem::new(rpc_network, None);
-        let hello_world: hello_world::Client =
-            rpc_system.bootstrap(rpc_twoparty_capnp::Side::Server);
+    tokio::task::LocalSet::new()
+        .run_until(async move {
+            let stream = tokio::net::TcpStream::connect(&addr).await?;
+            stream.set_nodelay(true)?;
+            let (reader, writer) =
+                tokio_util::compat::TokioAsyncReadCompatExt::compat(stream).split();
+            let rpc_network = Box::new(twoparty::VatNetwork::new(
+                reader,
+                writer,
+                rpc_twoparty_capnp::Side::Client,
+                Default::default(),
+            ));
+            let mut rpc_system = RpcSystem::new(rpc_network, None);
+            let hello_world: hello_world::Client =
+                rpc_system.bootstrap(rpc_twoparty_capnp::Side::Server);
 
-        tokio::task::spawn_local(rpc_system);
+            tokio::task::spawn_local(rpc_system);
 
-        let mut request = hello_world.say_hello_request();
-        request.get().init_request().set_name(&msg);
+            loop {
+                let mut request = hello_world.say_hello_request();
+                let mut params = request.get().init_request();
+                params.set_name(&msg);
+                params.set_callback_cap(capnp_rpc::new_client(CallBacker {}));
 
-        let reply = request.send().promise.await.unwrap();
+                let reply = request.send().promise.await.unwrap();
 
-        println!(
-            "received: {}",
-            reply
-                .get()
-                .unwrap()
-                .get_reply()
-                .unwrap()
-                .get_message()
-                .unwrap()
-        );
-        Ok(())
-    }).await
+                println!(
+                    "received: {}",
+                    reply
+                        .get()
+                        .unwrap()
+                        .get_reply()
+                        .unwrap()
+                        .get_message()
+                        .unwrap()
+                );
+
+                sleep(Duration::from_millis(1000)).await;
+            }
+        })
+        .await
 }
